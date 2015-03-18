@@ -17,6 +17,8 @@
 
 open Mirage_misc
 
+type key = Mirage_key.key
+
 module StringSet = struct
 
   include Set.Make(String)
@@ -27,6 +29,8 @@ module StringSet = struct
     !s
 
 end
+
+let configure_key () k = Printf.sprintf "(Bootvar.%s ())" (Mirage_key.name k)
 
 let main_ml = ref None
 
@@ -77,6 +81,7 @@ module type CONFIGURABLE = sig
   val module_name: t -> string
   val packages: t -> string list
   val libraries: t -> string list
+  val keys: t -> key list
   val configure: t -> unit
   val clean: t -> unit
   val update_path: t -> string -> t
@@ -99,6 +104,9 @@ module TODO (N: sig val name: string end) = struct
 
   let libraries _ =
     todo "libraries"
+
+  let keys _ =
+    todo "keys"
 
   let configure _ =
     todo "configure"
@@ -272,6 +280,11 @@ module Impl = struct
     | Foreign { libraries }      -> libraries
     | App {f; x}                 -> libraries f @ libraries x
 
+  let rec keys: type a. a impl -> key list = function
+    | Impl { t; m = (module M) } -> M.keys t
+    | Foreign _                  -> []
+    | App {f; x}                 -> keys f @ keys x
+
   let rec clean: type a. a impl -> unit = function
     | Impl { t; m = (module M) } -> M.clean t
     | Foreign _                  -> ()
@@ -326,6 +339,8 @@ module Io_page = struct
     | `Xen  -> ["io-page"]
     | `Unix | `MacOSX -> ["io-page"; "io-page.unix"]
 
+  let keys () = []
+
   let configure () = ()
 
   let clean () = ()
@@ -356,6 +371,8 @@ module Time = struct
   let packages () = []
 
   let libraries () = []
+
+  let keys () = []
 
   let configure () = ()
 
@@ -392,6 +409,8 @@ module Clock = struct
 
   let libraries () = packages ()
 
+  let keys () = []
+
   let configure () =
     append_main "let clock () = return (`Ok ())";
     newline_main ()
@@ -422,6 +441,8 @@ module Random = struct
   let packages () = []
 
   let libraries () = []
+
+  let keys () = []
 
   let configure () =
     append_main "let random () = return (`Ok ())";
@@ -464,6 +485,8 @@ module Console = struct
     match !mode with
     | `Unix | `MacOSX -> ["mirage-console.unix"]
     | `Xen -> ["mirage-console.xen"]
+
+  let keys _ = []
 
   let configure t =
     append_main "module %s = %s" (module_name t) (construction ());
@@ -513,6 +536,8 @@ module Crunch = struct
     "lwt";
     "cstruct";
   ] @ Io_page.libraries ()
+
+  let keys _ = []
 
   let ml t =
     Printf.sprintf "%s.ml" (name t)
@@ -605,6 +630,8 @@ module Block = struct
     | `Xen  -> "mirage-block-xen.front"
   ]
 
+  let keys _ = []
+
   let configure t =
     append_main "let %s () =" (name t);
     append_main "  %s.connect %S" (module_name t) t;
@@ -651,6 +678,8 @@ module Fat = struct
     "fat-filesystem"
     :: Impl.libraries t.io_page
     @  Impl.libraries t.block
+
+  let keys _ = []
 
   let configure t =
     Impl.configure t.io_page;
@@ -720,6 +749,8 @@ module Fat_of_files = struct
 
   let libraries t =
     Impl.libraries (fat (block t))
+
+  let keys _ = []
 
   let configure t =
     let fat = fat (block t) in
@@ -794,6 +825,8 @@ module Network = struct
   let libraries t =
     packages t
 
+  let keys _ = []
+
   let configure t =
     append_main "let %s () =" (name t);
     append_main "  %s.connect %S"
@@ -838,6 +871,8 @@ module Ethif = struct
     | `Unix | `MacOSX -> [ "tcpip.ethif-unix" ]
     | `Xen  -> [ "tcpip.ethif" ]
 
+  let keys _ = []
+
   let configure t =
     let name = name t in
     Impl.configure t;
@@ -872,27 +907,21 @@ type ('ipaddr, 'prefix) ip_config = {
 
 type ipv4_config = (Ipaddr.V4.t, Ipaddr.V4.t) ip_config
 
-let meta_ipv4_config t =
-  Printf.sprintf "(Ipaddr.V4.of_string_exn %S, Ipaddr.V4.of_string_exn %S, [%s])"
-    (Ipaddr.V4.to_string t.address)
-    (Ipaddr.V4.to_string t.netmask)
-    (String.concat "; "
-       (List.map (Printf.sprintf "Ipaddr.V4.of_string_exn %S")
-          (List.map Ipaddr.V4.to_string t.gateways)))
-
 module IPV4 = struct
 
   type t = {
     ethernet: ethernet impl;
     clock: clock impl;
     time: time impl;
-    config  : ipv4_config;
+    address: key;
+    netmask: key;
+    gateways: key
   }
   (* XXX: should the type if ipv4.id be ipv4.t ?
      N.connect ethif |> N.set_ip up *)
 
   let name t =
-    let key = "ipv4" ^ Impl.name t.ethernet ^ meta_ipv4_config t.config in
+    let key = "ipv4" ^ Impl.name t.ethernet in
     Name.of_key key ~base:"ipv4"
 
   let module_name t =
@@ -906,6 +935,9 @@ module IPV4 = struct
      | `Unix | `MacOSX -> [ "tcpip.ipv4-unix" ]
      | `Xen  -> [ "tcpip.ipv4" ])
     @ Impl.libraries t.ethernet
+
+  let keys t =
+    t.address :: t.netmask :: t.gateways :: Impl.keys t.ethernet
 
   let configure t =
     let name = name t in
@@ -923,17 +955,12 @@ module IPV4 = struct
     append_main "   %s.connect eth >>= function" mname;
     append_main "   | `Error _ -> %s" (driver_initialisation_error "IPV4");
     append_main "   | `Ok ip   ->";
-    append_main "   let i = Ipaddr.V4.of_string_exn in";
-    append_main "   %s.set_ip ip (i %S) >>= fun () ->"
-      mname (Ipaddr.V4.to_string t.config.address);
-    append_main "   %s.set_ip_netmask ip (i %S) >>= fun () ->"
-      mname (Ipaddr.V4.to_string t.config.netmask);
-    append_main "   %s.set_ip_gateways ip [%s] >>= fun () ->"
-      mname
-      (String.concat "; "
-         (List.map
-            (fun n -> Printf.sprintf "(i %S)" (Ipaddr.V4.to_string n))
-            t.config.gateways));
+    append_main "   %s.set_ip ip %a >>= fun () ->"
+      mname configure_key t.address;
+    append_main "   %s.set_ip_netmask ip %a >>= fun () ->"
+      mname configure_key t.netmask;
+    append_main "   %s.set_ip_gateways ip %a >>= fun () ->"
+      mname configure_key t.gateways;
     append_main "   return (`Ok ip)";
     newline_main ()
 
@@ -947,29 +974,21 @@ end
 
 type ipv6_config = (Ipaddr.V6.t, Ipaddr.V6.Prefix.t list) ip_config
 
-let meta_ipv6_config t =
-  Printf.sprintf "(Ipaddr.V6.of_string_exn %S, [%s], [%s])"
-    (Ipaddr.V6.to_string t.address)
-    (String.concat "; "
-       (List.map (Printf.sprintf "Ipaddr.V6.Prefix.of_string_exn %S")
-          (List.map Ipaddr.V6.Prefix.to_string t.netmask)))
-    (String.concat "; "
-       (List.map (Printf.sprintf "Ipaddr.V6.of_string_exn %S")
-          (List.map Ipaddr.V6.to_string t.gateways)))
-
 module IPV6 = struct
 
   type t = {
     time    : time impl;
     clock   : clock impl;
     ethernet: ethernet impl;
-    config  : ipv6_config;
+    address : key;
+    netmask : key;
+    gateways : key
   }
   (* XXX: should the type if ipv4.id be ipv4.t ?
      N.connect ethif |> N.set_ip up *)
 
   let name t =
-    let key = "ipv6" ^ Impl.name t.time ^ Impl.name t.clock ^ Impl.name t.ethernet ^ meta_ipv6_config t.config in
+    let key = "ipv6" ^ Impl.name t.time ^ Impl.name t.clock ^ Impl.name t.ethernet in
     Name.of_key key ~base:"ipv6"
 
   let module_name t =
@@ -983,6 +1002,10 @@ module IPV6 = struct
      | `Unix | `MacOSX -> [ "tcpip.ipv6-unix" ]
      | `Xen  -> [ "tcpip.ipv6" ])
     @ Impl.libraries t.time @ Impl.libraries t.clock @ Impl.libraries t.ethernet
+
+  let keys t =
+    t.address :: t.netmask :: t.gateways ::
+    Impl.keys t.time @ Impl.keys t.clock @ Impl.keys t.ethernet
 
   let configure t =
     let name = name t in
@@ -998,19 +1021,12 @@ module IPV6 = struct
     append_main "   %s.connect eth >>= function" mname;
     append_main "   | `Error _ -> %s" (driver_initialisation_error name);
     append_main "   | `Ok ip   ->";
-    append_main "   let i = Ipaddr.V6.of_string_exn in";
-    append_main "   %s.set_ip ip (i %S) >>= fun () ->"
-      mname (Ipaddr.V6.to_string t.config.address);
-    List.iter begin fun netmask ->
-      append_main "   %s.set_ip_netmask ip (i %S) >>= fun () ->"
-        mname (Ipaddr.V6.Prefix.to_string netmask)
-    end t.config.netmask;
-    append_main "   %s.set_ip_gateways ip [%s] >>= fun () ->"
-      mname
-      (String.concat "; "
-         (List.map
-            (fun n -> Printf.sprintf "(i %S)" (Ipaddr.V6.to_string n))
-            t.config.gateways));
+    append_main "   %s.set_ip ip %a >>= fun () ->"
+      mname configure_key t.address;
+    append_main "   Lwt_list.iter_s (%s.set_ip_netmask ip) %a >>= fun () ->"
+      mname configure_key t.netmask;
+    append_main "   %s.set_ip_gateways ip %a >>= fun () ->"
+      mname configure_key t.gateways;
     append_main "   return (`Ok ip)";
     newline_main ()
 
@@ -1040,21 +1056,39 @@ type ipv6 = v6 ip
 let ipv4 : ipv4 typ = ip
 let ipv6 : ipv6 typ = ip
 
+let key_ipv4_address default =
+  Mirage_key.create
+    ~doc:"IPv4 address" ~default
+    "ipv4-address" Mirage_key.ipaddrv4
+
+let key_ipv4_netmask default =
+  Mirage_key.create
+    ~doc:"IPv4 netmask" ~default
+    "ipv4-netmask" Mirage_key.ipaddrv4
+
+let key_ipv4_gateways default =
+  Mirage_key.create
+    ~doc:"IPv4 gateways" ~default
+    "ipv4-gateways" Mirage_key.(list ipaddrv4)
+
 let create_ipv4 ?(clock = default_clock) ?(time = default_time) net config =
   let etif = etif net in
+  let address = key_ipv4_address config.address in
+  let netmask = key_ipv4_netmask config.netmask in
+  let gateways = key_ipv4_gateways config.gateways in
   let t = {
     IPV4.ethernet = etif;
     clock;
     time;
-    config } in
+    address; netmask; gateways } in
   impl ipv4 t (module IPV4)
 
 let default_ipv4_conf =
   let i = Ipaddr.V4.of_string_exn in
   {
-    address  = i "10.0.0.2";
-    netmask  = i "255.255.255.0";
-    gateways = [i "10.0.0.1"];
+    address = i "10.0.0.2";
+    netmask = i "255.255.255.0";
+    gateways = [i "10.0.0.1"]
   }
 
 let default_ipv4 net =
@@ -1065,10 +1099,25 @@ let create_ipv6
     ?(clock = default_clock)
     net config =
   let etif = etif net in
+  let address =
+    Mirage_key.create
+      ~doc:"IPv6 address" ~default:config.address
+      "ipv6-address" Mirage_key.ipaddrv6
+  in
+  let netmask =
+    Mirage_key.create
+      ~doc:"IPv6 netmasks" ~default:config.netmask
+      "ipv6-netmasks" Mirage_key.(list ipaddrprefixv6)
+  in
+  let gateways =
+    Mirage_key.create
+      ~doc:"IPv6 gateways" ~default:config.gateways
+      "ipv6-gateways" Mirage_key.(list ipaddrv6)
+  in
   let t = {
     IPV6.ethernet = etif;
     time; clock;
-    config
+    address; netmask; gateways
   } in
   impl ipv6 t (module IPV6)
 
@@ -1087,6 +1136,8 @@ module UDP_direct (V : sig type t end) = struct
 
   let libraries t =
     Impl.libraries t @ [ "tcpip.udp" ]
+
+  let keys t = Impl.keys t
 
   let configure t =
     let name = name t in
@@ -1121,6 +1172,8 @@ module UDPV4_socket = struct
     match !mode with
     | `Unix | `MacOSX -> [ "tcpip.udpv4-socket" ]
     | `Xen  -> failwith "No socket implementation available for Xen"
+
+  let keys _ = []
 
   let configure t =
     append_main "let %s () =" (name t);
@@ -1188,6 +1241,9 @@ module TCP_direct (V : sig type t end) = struct
     @  Impl.libraries t.ip
     @  Impl.libraries t.random
 
+  let keys t =
+    Impl.keys t.clock @ Impl.keys t.time @ Impl.keys t.ip @ Impl.keys t.random
+
   let configure t =
     let name = name t in
     Impl.configure t.clock;
@@ -1237,6 +1293,8 @@ module TCPV4_socket = struct
     | `Unix | `MacOSX -> [ "tcpip.tcpv4-socket" ]
     | `Xen  -> failwith "No socket implementation available for Xen"
 
+  let keys _ = []
+
   let configure t =
     append_main "let %s () =" (name t);
     let ip = match t with
@@ -1281,7 +1339,7 @@ module STACKV4_direct = struct
     console: console impl;
     network: network impl;
     random : random impl;
-    config : [`DHCP | `IPV4 of ipv4_config];
+    config : key;
   }
 
   let name t =
@@ -1290,10 +1348,7 @@ module STACKV4_direct = struct
               ^ Impl.name t.time
               ^ Impl.name t.console
               ^ Impl.name t.network
-              ^ Impl.name t.random
-              ^ match t.config with
-              | `DHCP   -> "dhcp"
-              | `IPV4 i -> meta_ipv4_config i in
+              ^ Impl.name t.random in
     Name.of_key key ~base:"stackv4"
 
   let module_name t =
@@ -1315,6 +1370,14 @@ module STACKV4_direct = struct
     @  Impl.libraries t.console
     @  Impl.libraries t.network
     @  Impl.libraries t.random
+
+  let keys t =
+    t.config ::
+    Impl.keys t.clock @
+    Impl.keys t.time @
+    Impl.keys t.console @
+    Impl.keys t.network @
+    Impl.keys t.random
 
   let configure t =
     let name = name t in
@@ -1356,10 +1419,7 @@ module STACKV4_direct = struct
     append_main "  let config = {";
     append_main "    V1_LWT.name = %S;" name;
     append_main "    console; interface;";
-    begin match t.config with
-      | `DHCP   -> append_main "    mode = `DHCP;"
-      | `IPV4 i -> append_main "    mode = `IPv4 %s;" (meta_ipv4_config i);
-    end;
+    append_main "    mode = %a;" configure_key t.config;
     append_main "  } in";
     append_main "  %s.connect interface >>= function" ethif_name;
     append_main "  | `Error _ -> %s" (driver_initialisation_error ethif_name);
@@ -1398,17 +1458,11 @@ module STACKV4_socket = struct
 
   type t = {
     console: console impl;
-    ipv4s  : Ipaddr.V4.t list;
+    ipv4s  : key;
   }
 
-  let meta_ips ips =
-    String.concat "; "
-      (List.map (fun x ->
-           Printf.sprintf "Ipaddr.V4.of_string_exn %S" (Ipaddr.V4.to_string x)
-         ) ips)
-
   let name t =
-    let key = "stackv4" ^ Impl.name t.console ^ meta_ips t.ipv4s in
+    let key = "stackv4" ^ Impl.name t.console in
     Name.of_key key ~base:"stackv4"
 
   let module_name t =
@@ -1419,6 +1473,9 @@ module STACKV4_socket = struct
 
   let libraries t =
     "tcpip.stack-socket" :: Impl.libraries t.console
+
+  let keys t =
+    t.ipv4s :: Impl.keys t.console
 
   let configure t =
     let name = name t in
@@ -1433,7 +1490,7 @@ module STACKV4_socket = struct
     append_main "  | `Ok console ->";
     append_main "  let config = {";
     append_main "    V1_LWT.name = %S;" name;
-    append_main "    console; interface = [%s];" (meta_ips t.ipv4s);
+    append_main "    console; interface = %a;" configure_key t.ipv4s;
     append_main "    mode = ();";
     append_main "  } in";
     append_main "  Udpv4_socket.connect None >>= function";
@@ -1457,39 +1514,59 @@ type stackv4 = STACKV4
 
 let stackv4 = Type STACKV4
 
+let key_dhcp_or_staticv4 ~default =
+  Mirage_key.create
+    ~doc:"Use DHCP or static IP. Can either be 'dhcp' or 'static:ADDR:NM:GWS', where \
+          ADDR is the static IP address, NM is the netmask, and GWS is a comma separated of gateway \
+          addresses"
+    ~default
+    "stackv4"
+    Mirage_key.dhcporstaticv4
+
+let direct_stackv4
+    ?(clock=default_clock)
+    ?(random=default_random)
+    ?(time=default_time)
+    console network config =
+  let t = {
+    STACKV4_direct.console; network; time; clock; random;
+    config } in
+  impl stackv4 t (module STACKV4_direct)
+
 let direct_stackv4_with_dhcp
     ?(clock=default_clock)
     ?(random=default_random)
     ?(time=default_time)
     console network =
-  let t = {
-    STACKV4_direct.console; network; time; clock; random;
-    config = `DHCP } in
-  impl stackv4 t (module STACKV4_direct)
+  let key_config = key_dhcp_or_staticv4 ~default:`DHCP in
+  direct_stackv4 ~clock ~random ~time console network key_config
 
 let direct_stackv4_with_default_ipv4
     ?(clock=default_clock)
     ?(random=default_random)
     ?(time=default_time)
     console network =
-  let t = {
-    STACKV4_direct.console; network; clock; time; random;
-    config = `IPV4 default_ipv4_conf;
-  } in
-  impl stackv4 t (module STACKV4_direct)
+  let key_config =
+    key_dhcp_or_staticv4
+      ~default:(`IPv4 (default_ipv4_conf.address, default_ipv4_conf.netmask, default_ipv4_conf.gateways))
+  in
+  direct_stackv4 ~clock ~random ~time console network key_config
 
 let direct_stackv4_with_static_ipv4
     ?(clock=default_clock)
     ?(random=default_random)
     ?(time=default_time)
     console network ipv4 =
-  let t = {
-    STACKV4_direct.console; network; clock; time; random;
-    config = `IPV4 ipv4;
-  } in
-  impl stackv4 t (module STACKV4_direct)
+  let key_config =
+    key_dhcp_or_staticv4
+      ~default:(`IPv4 (ipv4.address, ipv4.netmask, ipv4.gateways))
+  in
+  direct_stackv4 ~clock ~random ~time console network key_config
 
 let socket_stackv4 console ipv4s =
+  let ipv4s =
+    Mirage_key.create ~default:ipv4s "ipv4-address" Mirage_key.(list ipaddrv4)
+  in
   impl stackv4 { STACKV4_socket.console; ipv4s } (module STACKV4_socket)
 
 module Conduit = struct
@@ -1530,6 +1607,11 @@ module Conduit = struct
       | false -> []
       | true  -> ["tls"]
     )
+
+  let keys t =
+    match t.stackv4 with
+    | None -> []
+    | Some s -> Impl.keys s
 
   let configure t =
     begin match t.stackv4 with
@@ -1599,6 +1681,8 @@ module Resolver_unix = struct
   let libraries t =
     [ "conduit.mirage"; "conduit.lwt-unix" ]
 
+  let keys _ = []
+
   let configure t =
     append_main "module %s = Resolver_lwt" (module_name t);
     append_main "let %s () =" (name t);
@@ -1635,6 +1719,9 @@ module Resolver_direct = struct
     [ "dns.mirage" ] @
     match t with
     | `DNS (s,_,_) -> Impl.libraries s
+
+  let keys = function
+    | `DNS (s, _, _) -> Impl.keys s
 
   let configure t =
     begin match t with
@@ -1704,6 +1791,8 @@ module HTTP = struct
     [ "mirage-http" ] @
     Impl.libraries conduit
 
+  let keys { conduit } = Impl.keys conduit
+
   let configure t =
     Impl.configure t.conduit;
     append_main "module %s = Cohttp_mirage.Server(%s.Flow)"
@@ -1759,6 +1848,8 @@ module Job = struct
 
   let libraries t =
     Impl.libraries t.impl
+
+  let keys t = Impl.keys t.impl
 
   let configure t =
     Impl.configure t.impl;
@@ -1947,6 +2038,28 @@ let libraries t =
     ) ls t.jobs in
   let ls = StringSet.union ls (Nocrypto_entropy.libraries ls) in
   StringSet.elements ls
+
+module KeySet = Set.Make (Mirage_key)
+
+let ks = ref KeySet.empty
+
+let add_key k set =
+  if KeySet.mem k set then
+    if k != KeySet.find k set then
+      error "Duplicate key name: %S" k.Mirage_key.name
+    else
+      set
+  else
+    KeySet.add k set
+
+let add_to_bootvars ?(doc = "(undocumented)") ?default name =
+  ks := add_key (Mirage_key.create ~doc ?default name Mirage_key.string) !ks
+
+let bootvars t =
+  let ks = List.fold_left (fun set j ->
+      List.fold_left (fun set k -> add_key k set) set (Impl.keys j)
+    ) !ks t.jobs in
+  KeySet.elements ks
 
 let configure_myocamlbuild_ml t =
   let minor, major = ocaml_version () in
@@ -2298,6 +2411,39 @@ let configure_job j =
   append_main "  %s.start %s" module_name (String.concat " " param_names);
   newline_main ()
 
+let configure_bootvar t =
+  info "%s bootvar.ml" (blue_s "Generating:");
+  set_main_ml (t.root / "bootvar.ml");
+  append_main "(* %s *)" generated_by_mirage;
+  newline_main ();
+  append_main "open Mirage_runtime.Configvar";
+  newline_main ();
+  let bootvars = bootvars t in
+  List.iter begin fun bv ->
+    append_main "let %s = ref %a" (Mirage_key.name bv) Mirage_key.print_ocaml bv;
+    append_main "let %s_t = Cmdliner_aux.term %a %s ~doc:%S ~name:%S ~runtime:true"
+      (Mirage_key.name bv) Mirage_key.print_meta bv (Mirage_key.name bv)
+      bv.Mirage_key.doc bv.Mirage_key.name;
+    append_main "let %s () = match !%s with None -> assert false | Some x -> x"
+      (Mirage_key.name bv) (Mirage_key.name bv)
+  end bootvars;
+  newline_main ();
+  append_main "open Lwt";
+  append_main "open Cmdliner";
+  newline_main ();
+  append_main "let parse_argv argv =";
+  append_main "  let rec loop = function";
+  append_main "    | [] -> Term.pure ()";
+  append_main "    | k :: ks -> Term.(pure (fun () () -> ()) $ k $ loop ks) in";
+  append_main "  match Term.(eval ~argv (loop [%s], info %S)) with"
+    (String.concat "; " (List.map (fun k -> Mirage_key.name k ^ "_t") bootvars)) t.name;
+  append_main "  | `Ok _ -> Lwt.return_unit";
+  append_main "  | _ -> exit 1";
+  newline_main ()
+
+let clean_bootvar t =
+  remove (t.root / "bootvar.ml")
+
 let configure_main t =
   info "%s main.ml" (blue_s "Generating:");
   set_main_ml (t.root / "main.ml");
@@ -2314,10 +2460,18 @@ let configure_main t =
   List.iter (fun j -> Impl.configure j) t.jobs;
   List.iter configure_job t.jobs;
   let names = List.map (fun j -> Printf.sprintf "%s ()" (Impl.name j)) t.jobs in
+  match bootvars t with
+  | [] ->
   append_main "let () =";
   append_main "  OS.Main.run (%s >>= fun () -> join [%s])"
               (Nocrypto_entropy.preamble ())
               (String.concat "; " names)
+  | _ :: _ ->
+  append_main "let () =";
+  append_main "  let t =";
+  append_main "    OS.Env.argv () >>= Bootvar.parse_argv >>= fun () ->";
+  append_main "    join [%s] in" (String.concat "; " names);
+  append_main "  OS.Main.run t"
 
 let clean_main t =
   List.iter Impl.clean t.jobs;
@@ -2360,6 +2514,7 @@ let clean t =
       clean_main_xl t;
       clean_main_xe t;
       clean_main_libvirt_xml t;
+      clean_bootvar t;
       clean_main t;
       command "rm -rf %s/_build" t.root;
       command "rm -rf log %s/main.native.o %s/main.native %s/mir-%s %s/*~"
