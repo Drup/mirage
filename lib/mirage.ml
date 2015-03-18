@@ -1967,6 +1967,7 @@ type t = {
   root: string;
   jobs: job impl list;
   tracing: tracing option;
+  bootvars: key list
 }
 
 let t = ref None
@@ -1988,15 +1989,15 @@ let get_config_file () =
 let update_path t root =
   { t with jobs = List.map (fun j -> Impl.update_path j root) t.jobs }
 
-let register ?tracing name jobs =
+let register ?tracing ?(bootvars = []) name jobs =
   let root = match !config_file with
     | None   -> failwith "no config file"
     | Some f -> Filename.dirname f in
-  t := Some { name; jobs; root; tracing }
+  t := Some { name; jobs; root; tracing; bootvars }
 
 let registered () =
   match !t with
-  | None   -> { name = "empty"; jobs = []; root = Sys.getcwd (); tracing = None }
+  | None   -> { name = "empty"; jobs = []; root = Sys.getcwd (); tracing = None; bootvars = [] }
   | Some t -> t
 
 let ps = ref StringSet.empty
@@ -2041,8 +2042,6 @@ let libraries t =
 
 module KeySet = Set.Make (Mirage_key)
 
-let ks = ref KeySet.empty
-
 let add_key k set =
   if KeySet.mem k set then
     if k != KeySet.find k set then
@@ -2052,13 +2051,14 @@ let add_key k set =
   else
     KeySet.add k set
 
-let add_to_bootvars ?(doc = "(undocumented)") ?default name =
-  ks := add_key (Mirage_key.create ~doc ?default name Mirage_key.string) !ks
+let bootvar ?(doc = "(undocumented)") ?default name =
+  Mirage_key.create ~doc ?default name Mirage_key.string
 
 let bootvars t =
+  let ks = List.fold_left (fun set k -> add_key k set) KeySet.empty t.bootvars in
   let ks = List.fold_left (fun set j ->
       List.fold_left (fun set k -> add_key k set) set (Impl.keys j)
-    ) !ks t.jobs in
+    ) ks t.jobs in
   KeySet.elements ks
 
 let configure_myocamlbuild_ml t =
@@ -2491,6 +2491,7 @@ let configure t =
       configure_main_xl t;
       configure_main_xe t;
       configure_main_libvirt_xml t;
+      configure_bootvar t;
       configure_main t
     )
 
@@ -2559,6 +2560,7 @@ let load file =
   let file = scan_conf file in
   let root = realpath (Filename.dirname file) in
   let file = root / Filename.basename file in
+  info "%s %s" (blue_s "Compiling for target:") (string_of_mode !mode);
   set_config_file file;
   compile_and_dynlink file;
   let t = registered () in
