@@ -2458,23 +2458,20 @@ let configure_main t =
   List.iter (fun j -> Impl.configure j) t.jobs;
   List.iter configure_job t.jobs;
   let names = List.map (fun j -> Printf.sprintf "%s ()" (Impl.name j)) t.jobs in
-  match bootvars t with
-  | [] ->
+  append_main "let set_bootvar () =";
+  begin match bootvars t, !mode with
+    | [], _ ->
+  append_main "  Lwt.return_unit"
+    | _, `Xen ->
+  append_main "  Bootvar.create () >>= Lwt.wrap1 Bootvar.argv >>= Lwt.wrap1 Bootvar_gen.parse_argv";
+    | _, (`Unix | `MacOSX) ->
+  append_main "  OS.Env.argv () >>= Lwt.wrap1 Bootvar_gen.parse_argv";
+  end;
+  newline_main ();
   append_main "let () =";
-  append_main "  OS.Main.run (%s >>= fun () -> join [%s])"
+  append_main "  OS.Main.run (%s >>= set_bootvar >>= fun () -> join [%s])"
               (Nocrypto_entropy.preamble ())
               (String.concat "; " names)
-  | _ :: _ ->
-  append_main "let () =";
-  append_main "  let t =";
-  begin match !mode with
-    | `Xen ->
-  append_main "    Bootvar.create () >>= Lwt.wrap1 Bootvar.argv >>= Lwt.wrap1 Bootvar_gen.parse_argv >>= fun () ->";
-    | `Unix | `MacOSX ->
-  append_main "    OS.Env.argv () >>= Lwt.wrap1 Bootvar_gen.parse_argv >>= fun () ->";
-  end;
-  append_main "    join [%s] in" (String.concat "; " names);
-  append_main "  OS.Main.run t"
 
 let clean_main t =
   List.iter Impl.clean t.jobs;
