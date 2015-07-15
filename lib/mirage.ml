@@ -1364,7 +1364,6 @@ module STACKV4_direct = struct
 
   let libraries t =
     "tcpip.stack-direct"
-    :: "mirage.runtime"
     :: Impl.libraries t.clock
     @  Impl.libraries t.time
     @  Impl.libraries t.console
@@ -2249,7 +2248,7 @@ let get_extra_ld_flags ~filter pkgs =
 
 let configure_makefile t =
   let file = t.root / "Makefile" in
-  let pkgs = "lwt.syntax" :: libraries t in
+  let pkgs = "lwt.syntax" :: "mirage.runtime" :: libraries t in
   let libraries_str =
     match pkgs with
     | [] -> ""
