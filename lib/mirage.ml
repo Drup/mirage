@@ -766,8 +766,9 @@ let nocrypto = impl @@ object
 
     method packages =
       Key.(if_ is_xen)
-        [ "mirage-entropy-xen" ]
-        []
+        [ "nocrypto" ; "mirage-xen" ;
+          "mirage-entropy-xen" ; "zarith-xen" ]
+        [ "nocrypto" ; "lwt"]
 
     method libraries =
       Key.(if_ is_xen)
